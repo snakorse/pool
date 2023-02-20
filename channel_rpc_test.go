@@ -246,6 +246,32 @@ func TestPoolConcurrent2(t *testing.T) {
 	wg.Wait()
 }
 
+func TestChannelPool_SetMaxCap(t *testing.T) {
+	p, _ := newChannelPool()
+
+	for i := 0; i < MaximumCap; i++ {
+		_, _ = p.Get()
+	}
+
+	var conn interface{}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		conn, _ = p.Get()
+		wg.Done()
+	}()
+	time.Sleep(time.Second * 5)
+	if conn != nil {
+		t.Errorf("Get error. Expect nil, but got not nil")
+	}
+
+	p.SetMaxCap(MaximumCap + 1)
+	wg.Wait()
+	if conn == nil {
+		t.Errorf("Get error. Expect not nil, but got nil")
+	}
+}
+
 //
 //func TestPoolConcurrent3(t *testing.T) {
 //	p, _ := NewChannelPool(0, 1, factory)

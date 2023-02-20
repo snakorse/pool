@@ -46,6 +46,7 @@ type channelPool struct {
 	maxActive                int32
 	openingConns             int32
 	connReqs                 []chan connReq
+	statusChangedSignal      chan struct{}
 }
 
 type idleConn struct {
@@ -66,12 +67,13 @@ func NewChannelPool(poolConfig *Config) (Pool, error) {
 	}
 
 	c := &channelPool{
-		conns:        make(chan *idleConn, poolConfig.MaxIdle),
-		factory:      poolConfig.Factory,
-		close:        poolConfig.Close,
-		idleTimeout:  poolConfig.IdleTimeout,
-		maxActive:    int32(poolConfig.MaxCap),
-		openingConns: int32(poolConfig.InitialCap),
+		conns:               make(chan *idleConn, poolConfig.MaxIdle),
+		factory:             poolConfig.Factory,
+		close:               poolConfig.Close,
+		idleTimeout:         poolConfig.IdleTimeout,
+		maxActive:           int32(poolConfig.MaxCap),
+		openingConns:        int32(poolConfig.InitialCap),
+		statusChangedSignal: make(chan struct{}),
 	}
 
 	if poolConfig.Ping != nil {
@@ -100,6 +102,7 @@ func (c *channelPool) getConns() chan *idleConn {
 
 // Get 从pool中取一个连接
 func (c *channelPool) Get() (interface{}, error) {
+BEGIN:
 	conns := c.getConns()
 	if conns == nil {
 		return nil, ErrClosed
@@ -132,19 +135,26 @@ func (c *channelPool) Get() (interface{}, error) {
 			if openingConns >= atomic.LoadInt32(&c.maxActive) {
 				req := make(chan connReq, 1)
 				c.connReqs = append(c.connReqs, req)
+				if c.statusChangedSignal == nil {
+					c.statusChangedSignal = make(chan struct{})
+				}
 				c.mu.Unlock()
-				ret, ok := <-req
-				if !ok {
-					return nil, ErrMaxActiveConnReached
-				}
-				if timeout := c.idleTimeout; timeout > 0 {
-					if ret.idleConn.t.Add(timeout).Before(time.Now()) {
-						//丢弃并关闭该连接
-						c.Close(ret.idleConn.conn)
-						continue
+				select {
+				case ret, ok := <-req:
+					if !ok {
+						return nil, ErrMaxActiveConnReached
 					}
+					if timeout := c.idleTimeout; timeout > 0 {
+						if ret.idleConn.t.Add(timeout).Before(time.Now()) {
+							//丢弃并关闭该连接
+							c.Close(ret.idleConn.conn)
+							continue
+						}
+					}
+					return ret.idleConn.conn, nil
+				case <-c.statusChangedSignal:
+					goto BEGIN
 				}
-				return ret.idleConn.conn, nil
 			}
 			if c.factory == nil {
 				c.mu.Unlock()
@@ -208,6 +218,7 @@ func (c *channelPool) Close(conn interface{}) error {
 		return nil
 	}
 	atomic.AddInt32(&c.openingConns, -1)
+	c.signalStatusChanged()
 	return c.close(conn)
 }
 
@@ -228,6 +239,7 @@ func (c *channelPool) Release() {
 	c.ping = nil
 	closeFun := c.close
 	c.close = nil
+	c.signalStatusChanged()
 	c.mu.Unlock()
 
 	if conns == nil {
@@ -239,6 +251,7 @@ func (c *channelPool) Release() {
 		//log.Printf("Type %v\n",reflect.TypeOf(wrapConn.conn))
 		closeFun(wrapConn.conn)
 	}
+
 }
 
 // Len 连接池中已有的连接
@@ -253,11 +266,25 @@ func (c *channelPool) Opening() int {
 
 // SetMaxCap 调整最大连接数
 func (c *channelPool) SetMaxCap(maxCap int) error {
-	atomic.StoreInt32(&c.maxActive, int32(maxCap))
+	old := atomic.SwapInt32(&c.maxActive, int32(maxCap))
+	if old >= int32(maxCap) {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.signalStatusChanged()
 	return nil
 }
 
 // GetMaxCap 返回最大连接数
 func (c *channelPool) GetMaxCap() int {
 	return int(atomic.LoadInt32(&c.maxActive))
+}
+
+func (c *channelPool) signalStatusChanged() {
+	if c.statusChangedSignal == nil {
+		return
+	}
+	close(c.statusChangedSignal)
+	c.statusChangedSignal = nil
 }
