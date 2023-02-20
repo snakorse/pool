@@ -108,50 +108,20 @@ BEGIN:
 		return nil, ErrClosed
 	}
 	for {
+		var wrapConn *idleConn
 		select {
-		case wrapConn := <-conns:
-			if wrapConn == nil {
-				return nil, ErrClosed
-			}
-			//判断是否超时，超时则丢弃
-			if timeout := c.idleTimeout; timeout > 0 {
-				if wrapConn.t.Add(timeout).Before(time.Now()) {
-					//丢弃并关闭该连接
-					c.Close(wrapConn.conn)
-					continue
-				}
-			}
-			//判断是否失效，失效则丢弃，如果用户没有设定 ping 方法，就不检查
-			if c.ping != nil {
-				if err := c.Ping(wrapConn.conn); err != nil {
-					c.Close(wrapConn.conn)
-					continue
-				}
-			}
-			return wrapConn.conn, nil
+		case wrapConn = <-conns:
 		default:
 			c.mu.Lock()
 			openingConns := atomic.LoadInt32(&c.openingConns)
 			if openingConns >= atomic.LoadInt32(&c.maxActive) {
-				req := make(chan connReq, 1)
-				c.connReqs = append(c.connReqs, req)
 				if c.statusChangedSignal == nil {
 					c.statusChangedSignal = make(chan struct{})
 				}
 				c.mu.Unlock()
 				select {
-				case ret, ok := <-req:
-					if !ok {
-						return nil, ErrMaxActiveConnReached
-					}
-					if timeout := c.idleTimeout; timeout > 0 {
-						if ret.idleConn.t.Add(timeout).Before(time.Now()) {
-							//丢弃并关闭该连接
-							c.Close(ret.idleConn.conn)
-							continue
-						}
-					}
-					return ret.idleConn.conn, nil
+				case wrapConn = <-conns:
+					goto GOTCONN
 				case <-c.statusChangedSignal:
 					goto BEGIN
 				}
@@ -169,6 +139,27 @@ BEGIN:
 			c.mu.Unlock()
 			return conn, nil
 		}
+
+	GOTCONN:
+		if wrapConn == nil {
+			return nil, ErrClosed
+		}
+		//判断是否超时，超时则丢弃
+		if timeout := c.idleTimeout; timeout > 0 {
+			if wrapConn.t.Add(timeout).Before(time.Now()) {
+				//丢弃并关闭该连接
+				c.Close(wrapConn.conn)
+				continue
+			}
+		}
+		//判断是否失效，失效则丢弃，如果用户没有设定 ping 方法，就不检查
+		if c.ping != nil {
+			if err := c.Ping(wrapConn.conn); err != nil {
+				c.Close(wrapConn.conn)
+				continue
+			}
+		}
+		return wrapConn.conn, nil
 	}
 }
 
