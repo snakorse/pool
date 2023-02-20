@@ -56,7 +56,7 @@ type idleConn struct {
 
 // NewChannelPool 初始化连接
 func NewChannelPool(poolConfig *Config) (Pool, error) {
-	if !(poolConfig.InitialCap <= poolConfig.MaxIdle && poolConfig.MaxCap >= poolConfig.MaxIdle && poolConfig.InitialCap >= 0) {
+	if !(poolConfig.InitialCap <= poolConfig.MaxIdle /*&& poolConfig.MaxCap >= poolConfig.MaxIdle*/ && poolConfig.InitialCap >= 0) {
 		return nil, errors.New("invalid capacity settings")
 	}
 	if poolConfig.Factory == nil {
