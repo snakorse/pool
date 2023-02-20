@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/silenceper/pool"
+	"github.com/snakorse/pool"
 )
 
 const addr string = "127.0.0.1:8080"

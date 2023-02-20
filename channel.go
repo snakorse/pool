@@ -3,10 +3,9 @@ package pool
 import (
 	"errors"
 	"fmt"
-	log "github.com/sirupsen/logrus"
 	"sync"
+	"sync/atomic"
 	"time"
-	//"reflect"
 )
 
 var (
@@ -44,8 +43,8 @@ type channelPool struct {
 	close                    func(interface{}) error
 	ping                     func(interface{}) error
 	idleTimeout, waitTimeOut time.Duration
-	maxActive                int
-	openingConns             int
+	maxActive                int32
+	openingConns             int32
 	connReqs                 []chan connReq
 }
 
@@ -71,8 +70,8 @@ func NewChannelPool(poolConfig *Config) (Pool, error) {
 		factory:      poolConfig.Factory,
 		close:        poolConfig.Close,
 		idleTimeout:  poolConfig.IdleTimeout,
-		maxActive:    poolConfig.MaxCap,
-		openingConns: poolConfig.InitialCap,
+		maxActive:    int32(poolConfig.MaxCap),
+		openingConns: int32(poolConfig.InitialCap),
 	}
 
 	if poolConfig.Ping != nil {
@@ -129,8 +128,8 @@ func (c *channelPool) Get() (interface{}, error) {
 			return wrapConn.conn, nil
 		default:
 			c.mu.Lock()
-			log.Debugf("openConn %v %v", c.openingConns, c.maxActive)
-			if c.openingConns >= c.maxActive {
+			openingConns := atomic.LoadInt32(&c.openingConns)
+			if openingConns >= atomic.LoadInt32(&c.maxActive) {
 				req := make(chan connReq, 1)
 				c.connReqs = append(c.connReqs, req)
 				c.mu.Unlock()
@@ -156,7 +155,7 @@ func (c *channelPool) Get() (interface{}, error) {
 				c.mu.Unlock()
 				return nil, err
 			}
-			c.openingConns++
+			atomic.AddInt32(&c.openingConns, 1)
 			c.mu.Unlock()
 			return conn, nil
 		}
@@ -208,7 +207,7 @@ func (c *channelPool) Close(conn interface{}) error {
 	if c.close == nil {
 		return nil
 	}
-	c.openingConns--
+	atomic.AddInt32(&c.openingConns, -1)
 	return c.close(conn)
 }
 
@@ -245,4 +244,20 @@ func (c *channelPool) Release() {
 // Len 连接池中已有的连接
 func (c *channelPool) Len() int {
 	return len(c.getConns())
+}
+
+// Opening 返回打开的连接数
+func (c *channelPool) Opening() int {
+	return int(atomic.LoadInt32(&c.openingConns))
+}
+
+// SetMaxCap 调整最大连接数
+func (c *channelPool) SetMaxCap(maxCap int) error {
+	atomic.StoreInt32(&c.maxActive, int32(maxCap))
+	return nil
+}
+
+// GetMaxCap 返回最大连接数
+func (c *channelPool) GetMaxCap() int {
+	return int(atomic.LoadInt32(&c.maxActive))
 }

@@ -18,4 +18,10 @@ type Pool interface {
 	Release()
 
 	Len() int
+
+	Opening() int
+
+	SetMaxCap(maxCap int) error
+
+	GetMaxCap() int
 }

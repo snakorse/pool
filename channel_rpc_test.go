@@ -71,6 +71,10 @@ func TestPool_Get(t *testing.T) {
 			(InitialCap - 1), p.Len())
 	}
 
+	if p.Opening() != InitialCap {
+		t.Errorf("Opening error. Expecting %d, but got %d", InitialCap, p.Opening())
+	}
+
 	// get them all
 	var wg sync.WaitGroup
 	for i := 0; i < (MaximumCap - 1); i++ {
@@ -87,19 +91,27 @@ func TestPool_Get(t *testing.T) {
 
 	if p.Len() != 0 {
 		t.Errorf("Get error. Expecting %d, got %d",
-			(InitialCap - 1), p.Len())
+			0, p.Len())
 	}
 
-	_, err = p.Get()
-	if err != ErrMaxActiveConnReached {
-		t.Errorf("Get error: %s", err)
+	if p.Opening() != MaximumCap {
+		t.Errorf("Opening error. Expecting %d, but got %d", MaximumCap, p.Opening())
 	}
 
+	var conn interface{}
+	go func() {
+		conn, _ = p.Get()
+	}()
+
+	time.Sleep(time.Second * 5)
+	if conn != nil {
+		t.Errorf("expect Get blocking, but return not nil conn")
+	}
 }
 
 func TestPool_Put(t *testing.T) {
 	pconf := Config{InitialCap: InitialCap, MaxCap: MaximumCap, Factory: factory, Close: closeFac, IdleTimeout: time.Second * 20,
-		MaxIdle:MaxIdleCap}
+		MaxIdle: MaxIdleCap}
 	p, err := NewChannelPool(&pconf)
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +267,7 @@ func TestPoolConcurrent2(t *testing.T) {
 
 func newChannelPool() (Pool, error) {
 	pconf := Config{InitialCap: InitialCap, MaxCap: MaximumCap, Factory: factory, Close: closeFac, IdleTimeout: time.Second * 20,
-		MaxIdle:MaxIdleCap}
+		MaxIdle: MaxIdleCap}
 	return NewChannelPool(&pconf)
 }
 
