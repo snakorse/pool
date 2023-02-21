@@ -118,11 +118,12 @@ BEGIN:
 				if c.statusChangedSignal == nil {
 					c.statusChangedSignal = make(chan struct{})
 				}
+				statusCh := c.statusChangedSignal
 				c.mu.Unlock()
 				select {
 				case wrapConn = <-conns:
 					goto GOTCONN
-				case <-c.statusChangedSignal:
+				case <-statusCh:
 					goto BEGIN
 				}
 			}

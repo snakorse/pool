@@ -183,7 +183,7 @@ func TestPoolConcurrent(t *testing.T) {
 		p.Release()
 	}()
 
-	for i := 0; i < MaximumCap; i++ {
+	for i := 0; i < 10000; i++ {
 		go func() {
 			conn, _ := p.Get()
 
@@ -196,6 +196,11 @@ func TestPoolConcurrent(t *testing.T) {
 				return
 			}
 			p.Put(conn)
+		}()
+
+		n := i
+		go func() {
+			p.SetMaxCap(10000 + n)
 		}()
 	}
 }
