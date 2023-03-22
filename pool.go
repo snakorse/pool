@@ -1,6 +1,9 @@
 package pool
 
-import "errors"
+import (
+	"errors"
+	"net"
+)
 
 var (
 	//ErrClosed 连接池已经关闭Error
@@ -9,11 +12,11 @@ var (
 
 // Pool 基本方法
 type Pool interface {
-	Get() (interface{}, error)
+	Get() (net.Conn, error)
 
-	Put(interface{}) error
+	Put(conn net.Conn) error
 
-	Close(interface{}) error
+	Close(conn net.Conn) error
 
 	Release()
 

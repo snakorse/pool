@@ -3,6 +3,7 @@ package pool
 import (
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,36 +23,34 @@ type Config struct {
 	//最大空闲连接
 	MaxIdle int
 	//生成连接的方法
-	Factory func() (interface{}, error)
+	Factory func() (net.Conn, error)
 	//关闭连接的方法
-	Close func(interface{}) error
+	Close func(conn net.Conn) error
 	//检查连接是否有效的方法
-	Ping func(interface{}) error
+	Ping func(conn net.Conn) error
 	//连接最大空闲时间，超过该事件则将失效
 	IdleTimeout time.Duration
-}
-
-type connReq struct {
-	idleConn *idleConn
+	//连接最大存活时间，超过该时间则关闭
+	LifeTime time.Duration
 }
 
 // channelPool 存放连接信息
 type channelPool struct {
-	mu                       sync.RWMutex
-	conns                    chan *idleConn
-	factory                  func() (interface{}, error)
-	close                    func(interface{}) error
-	ping                     func(interface{}) error
-	idleTimeout, waitTimeOut time.Duration
-	maxActive                int32
-	openingConns             int32
-	connReqs                 []chan connReq
-	statusChangedSignal      chan struct{}
+	mu                    sync.RWMutex
+	conns                 chan *idleConn
+	factory               func() (net.Conn, error)
+	close                 func(conn net.Conn) error
+	ping                  func(conn net.Conn) error
+	idleTimeout, lifeTime time.Duration
+	maxActive             int32
+	openingConns          int32
+	statusChangedSignal   chan struct{}
 }
 
 type idleConn struct {
-	conn interface{}
+	net.Conn
 	t    time.Time
+	born time.Time
 }
 
 // NewChannelPool 初始化连接
@@ -71,6 +70,7 @@ func NewChannelPool(poolConfig *Config) (Pool, error) {
 		factory:             poolConfig.Factory,
 		close:               poolConfig.Close,
 		idleTimeout:         poolConfig.IdleTimeout,
+		lifeTime:            poolConfig.LifeTime,
 		maxActive:           int32(poolConfig.MaxCap),
 		openingConns:        int32(poolConfig.InitialCap),
 		statusChangedSignal: make(chan struct{}),
@@ -86,7 +86,7 @@ func NewChannelPool(poolConfig *Config) (Pool, error) {
 			c.Release()
 			return nil, fmt.Errorf("factory is not able to fill the pool: %s", err)
 		}
-		c.conns <- &idleConn{conn: conn, t: time.Now()}
+		c.conns <- &idleConn{Conn: conn, born: time.Now(), t: time.Now()}
 	}
 
 	return c, nil
@@ -101,7 +101,7 @@ func (c *channelPool) getConns() chan *idleConn {
 }
 
 // Get 从pool中取一个连接
-func (c *channelPool) Get() (interface{}, error) {
+func (c *channelPool) Get() (net.Conn, error) {
 BEGIN:
 	conns := c.getConns()
 	if conns == nil {
@@ -136,9 +136,10 @@ BEGIN:
 				c.mu.Unlock()
 				return nil, err
 			}
+			wrapConn = &idleConn{Conn: conn, born: time.Now(), t: time.Now()}
 			atomic.AddInt32(&c.openingConns, 1)
 			c.mu.Unlock()
-			return conn, nil
+			return wrapConn, nil
 		}
 
 	GOTCONN:
@@ -149,23 +150,30 @@ BEGIN:
 		if timeout := c.idleTimeout; timeout > 0 {
 			if wrapConn.t.Add(timeout).Before(time.Now()) {
 				//丢弃并关闭该连接
-				c.Close(wrapConn.conn)
+				c.Close(wrapConn)
+				continue
+			}
+		}
+		//判断是否过期，过期则丢弃
+		if lifetime := c.lifeTime; lifetime > 0 {
+			if wrapConn.born.Add(lifetime).Before(time.Now()) {
+				c.Close(wrapConn)
 				continue
 			}
 		}
 		//判断是否失效，失效则丢弃，如果用户没有设定 ping 方法，就不检查
 		if c.ping != nil {
-			if err := c.Ping(wrapConn.conn); err != nil {
-				c.Close(wrapConn.conn)
+			if err := c.Ping(wrapConn); err != nil {
+				c.Close(wrapConn)
 				continue
 			}
 		}
-		return wrapConn.conn, nil
+		return wrapConn, nil
 	}
 }
 
 // Put 将连接放回pool中
-func (c *channelPool) Put(conn interface{}) error {
+func (c *channelPool) Put(conn net.Conn) error {
 	if conn == nil {
 		return errors.New("connection is nil. rejecting")
 	}
@@ -177,30 +185,26 @@ func (c *channelPool) Put(conn interface{}) error {
 		return c.Close(conn)
 	}
 
-	if l := len(c.connReqs); l > 0 {
-		req := c.connReqs[0]
-		copy(c.connReqs, c.connReqs[1:])
-		c.connReqs = c.connReqs[:l-1]
-		req <- connReq{
-			idleConn: &idleConn{conn: conn, t: time.Now()},
-		}
+	wrapConn, ok := conn.(*idleConn)
+	if !ok {
+		wrapConn = &idleConn{Conn: conn, t: time.Now(), born: time.Now()}
+	} else {
+		wrapConn.t = time.Now()
+	}
+
+	select {
+	case c.conns <- wrapConn:
 		c.mu.Unlock()
 		return nil
-	} else {
-		select {
-		case c.conns <- &idleConn{conn: conn, t: time.Now()}:
-			c.mu.Unlock()
-			return nil
-		default:
-			c.mu.Unlock()
-			//连接池已满，直接关闭该连接
-			return c.Close(conn)
-		}
+	default:
+		c.mu.Unlock()
+		//连接池已满，直接关闭该连接
+		return c.Close(conn)
 	}
 }
 
 // Close 关闭单条连接
-func (c *channelPool) Close(conn interface{}) error {
+func (c *channelPool) Close(conn net.Conn) error {
 	if conn == nil {
 		return errors.New("connection is nil. rejecting")
 	}
@@ -215,7 +219,7 @@ func (c *channelPool) Close(conn interface{}) error {
 }
 
 // Ping 检查单条连接是否有效
-func (c *channelPool) Ping(conn interface{}) error {
+func (c *channelPool) Ping(conn net.Conn) error {
 	if conn == nil {
 		return errors.New("connection is nil. rejecting")
 	}
@@ -241,7 +245,7 @@ func (c *channelPool) Release() {
 	close(conns)
 	for wrapConn := range conns {
 		//log.Printf("Type %v\n",reflect.TypeOf(wrapConn.conn))
-		closeFun(wrapConn.conn)
+		closeFun(wrapConn)
 	}
 
 }

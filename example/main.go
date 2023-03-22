@@ -28,10 +28,10 @@ func main() {
 func client() {
 
 	//factory 创建连接的方法
-	factory := func() (interface{}, error) { return net.Dial("tcp", addr) }
+	factory := func() (net.Conn, error) { return net.Dial("tcp", addr) }
 
 	//close 关闭连接的方法
-	close := func(v interface{}) error { return v.(net.Conn).Close() }
+	close := func(v net.Conn) error { return v.(net.Conn).Close() }
 
 	//创建一个连接池： 初始化2，最大连接5，空闲连接数是4
 	poolConfig := &pool.Config{

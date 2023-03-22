@@ -1,6 +1,8 @@
 package pool
 
 import (
+	"bufio"
+	"io"
 	"math/rand"
 	"net"
 	"net/http"
@@ -8,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 var (
@@ -15,14 +18,10 @@ var (
 	MaxIdleCap = 10
 	MaximumCap = 100
 	network    = "tcp"
-	address    = "127.0.0.1:7777"
-	//factory    = func() (interface{}, error) { return net.Dial(network, address) }
-	factory = func() (interface{}, error) {
-		return rpc.DialHTTP("tcp", address)
-	}
-	closeFac = func(v interface{}) error {
-		nc := v.(*rpc.Client)
-		return nc.Close()
+	address    = "127.0.0.1:17777"
+	factory    = func() (net.Conn, error) { return net.Dial(network, address) }
+	closeFac   = func(v net.Conn) error {
+		return v.Close()
 	}
 )
 
@@ -49,11 +48,56 @@ func TestPool_Get_Impl(t *testing.T) {
 	if err != nil {
 		t.Errorf("Get error: %s", err)
 	}
-	_, ok := conn.(*rpc.Client)
+	_, ok := conn.(*idleConn)
 	if !ok {
 		t.Errorf("Conn is not of type poolConn")
 	}
 	p.Put(conn)
+}
+
+func TestPool_LifeTime(t *testing.T) {
+	cfg := Config{InitialCap: 1, MaxCap: 2, MaxIdle: 2, Factory: factory, Close: closeFac, LifeTime: time.Second}
+	p, err := NewChannelPool(&cfg)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	conn, err := p.Get()
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	err = p.Put(conn)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	conn1, err := p.Get()
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	err = p.Put(conn)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if unsafe.Pointer(conn.(*idleConn)) != unsafe.Pointer(conn1.(*idleConn)) {
+		t.Errorf("should get same conn")
+	}
+
+	time.Sleep(time.Second * 2)
+
+	conn2, err := p.Get()
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if unsafe.Pointer(conn.(*idleConn)) == unsafe.Pointer(conn2.(*idleConn)) {
+		t.Errorf("should not get expired conn")
+	}
 }
 
 func TestPool_Get(t *testing.T) {
@@ -119,7 +163,7 @@ func TestPool_Put(t *testing.T) {
 	defer p.Release()
 
 	// get/create from the pool
-	conns := make([]interface{}, MaximumCap)
+	conns := make([]net.Conn, MaximumCap)
 	for i := 0; i < MaximumCap; i++ {
 		conn, _ := p.Get()
 		conns[i] = conn
@@ -177,7 +221,7 @@ func TestPool_Close(t *testing.T) {
 
 func TestPoolConcurrent(t *testing.T) {
 	p, _ := newChannelPool()
-	pipe := make(chan interface{}, 0)
+	pipe := make(chan net.Conn, 0)
 
 	go func() {
 		p.Release()
@@ -209,13 +253,23 @@ func TestPoolWriteRead(t *testing.T) {
 	//p, _ := NewChannelPool(0, 30, factory)
 	p, _ := newChannelPool()
 	conn, _ := p.Get()
-	cli := conn.(*rpc.Client)
-	var resp int
-	err := cli.Call("Arith.Multiply", Args{1, 2}, &resp)
+
+	io.WriteString(conn, "CONNECT "+rpc.DefaultRPCPath+" HTTP/1.0\n\n")
+	// Require successful HTTP response
+	// before switching to RPC protocol.
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+	if err != nil || resp.Status != "200 Connected to Go RPC" {
+		t.Errorf("dail http rpc failed, err: %s", err)
+		return
+	}
+	cli := rpc.NewClient(conn)
+
+	var result int
+	err = cli.Call("Arith.Multiply", Args{1, 2}, &result)
 	if err != nil {
 		t.Error(err)
 	}
-	if resp != 2 {
+	if result != 2 {
 		t.Error("rpc.err")
 	}
 }
@@ -311,7 +365,12 @@ func rpcServer() {
 	if e != nil {
 		panic(e)
 	}
-	go http.Serve(l, nil)
+	go func() {
+		err := http.Serve(l, nil)
+		if err != nil {
+			panic(e)
+		}
+	}()
 }
 
 type Args struct {
